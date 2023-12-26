@@ -1,9 +1,10 @@
 import { createProjectService, ProjectService } from './projectService';
 import { createProject, initProject, Project } from './project';
 import type { LanguageService, LanguageServiceHost, UserPreferences } from 'typescript/lib/tsserverlibrary';
+import { ProjectOptions } from '../types';
 
 // only create the once for all hosts, as this will improve performance as the internal cache can be reused
-let projectService: ProjectService;
+let projectServiceSingleton: ProjectService | undefined;
 const projects = new Set<Project>()
 
 export default function (
@@ -11,18 +12,26 @@ export default function (
 	sys: import('typescript/lib/tsserverlibrary').System,
 	host: LanguageServiceHost,
 	createLanguageService: (host: LanguageServiceHost) => LanguageService,
-	_createProject: typeof createProject = createProject
+	options: ProjectOptions | undefined,
+	_createProject: typeof createProject = createProject,
 ) {
 	const hostConfiguration = { preferences: { includePackageJsonAutoImports: 'auto' } as UserPreferences };
 
+	let projectService = options?.projectService as ProjectService;
+
 	if (!projectService) {
-		projectService = createProjectService(
-			ts,
-			sys,
-			host.getCurrentDirectory(),
-			hostConfiguration,
-			ts.LanguageServiceMode.Semantic
-		);
+		if (!projectServiceSingleton) {
+			projectServiceSingleton = createProjectService(
+				ts,
+				sys,
+				host.getCurrentDirectory(),
+				hostConfiguration,
+				ts.LanguageServiceMode.Semantic,
+				{}
+			);
+		}
+
+		projectService = projectServiceSingleton;
 	}
 
 	const project = _createProject(
@@ -30,11 +39,13 @@ export default function (
 		host,
 		createLanguageService,
 		{
-			projectService,
+			projectService: projectService,
 			currentDirectory: host.getCurrentDirectory(),
 			compilerOptions: host.getCompilationSettings(),
 		}
 	);
+
+	projectService.projects.add(project);
 
 	const proxyMethods: (keyof Project)[] = [
 		'getCachedExportInfoMap',
@@ -65,11 +76,18 @@ export default function (
 
 				const realPaths = [...projectToUpdate.symlinks?.getSymlinkedDirectoriesByRealpath()?.keys() ?? []]
 					.map(name => projectToUpdate.projectService.getNormalizedAbsolutePath(name));
-				
+
 				if (realPaths.includes(projectToUpdate.projectService.toCanonicalFileName(path))) {
 					projectToUpdate.autoImportProviderHost.markAsDirty();
 				}
 			})
 		},
+
+		dispose() {
+			projects.delete(project)
+			projectService.projects.delete(project)
+		}
 	};
 }
+
+export { createProjectService }

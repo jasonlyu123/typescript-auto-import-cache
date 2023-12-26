@@ -1,5 +1,6 @@
-import type { Path, System, server, LanguageServiceMode, UserPreferences } from 'typescript/lib/tsserverlibrary';
+import type { Path, System, server, LanguageServiceMode, UserPreferences, FileWatcher } from 'typescript/lib/tsserverlibrary';
 import { createPackageJsonCache, PackageJsonCache, Ternary, ProjectPackageJsonInfo } from './packageJsonCache';
+import { Project, ProjectServiceOptions } from '../types';
 
 export type ProjectService = ReturnType<typeof createProjectService>;
 
@@ -11,12 +12,18 @@ export const enum PackageJsonAutoImportPreference {
 	Auto,
 }
 
+const noopWatcher = {
+	close() {}
+}
+const returnNoopWatcher = () => noopWatcher
+
 export function createProjectService(
 	ts: typeof import('typescript/lib/tsserverlibrary'),
 	sys: System,
 	currentDirectory: string,
 	hostConfiguration: { preferences: UserPreferences; },
 	serverMode: LanguageServiceMode,
+	options?: ProjectServiceOptions,
 ) {
 	const {
 		toPath,
@@ -25,14 +32,20 @@ export function createProjectService(
 		createGetCanonicalFileName,
 		forEachAncestorDirectory,
 		getDirectoryPath,
+		combinePaths
 	} = ts as any;
+
+	const watchFactory = options?.watchFactory ?? {
+		watchFile: returnNoopWatcher,
+		watchDirectory: returnNoopWatcher
+	}
 
 	const projectService = {
 		serverMode,
 		host: sys,
 		currentDirectory: toNormalizedPath(currentDirectory),
 		toCanonicalFileName: createGetCanonicalFileName(sys.useCaseSensitiveFileNames),
-		toPath(fileName: string) {
+		toPath(fileName: string): Path {
 			return toPath(fileName, this.currentDirectory, this.toCanonicalFileName);
 		},
 
@@ -45,6 +58,8 @@ export function createProjectService(
 		},
 
 		packageJsonCache: undefined as unknown as PackageJsonCache,
+		packageJsonFilesMap: undefined as unknown as Map<Path, FileWatcher>,
+
 		getPackageJsonsVisibleToFile(fileName: string, rootDir?: string): readonly ProjectPackageJsonInfo[] {
 			const packageJsonCache = this.packageJsonCache;
 			const rootPath = rootDir && this.toPath(rootDir);
@@ -58,8 +73,8 @@ export function createProjectService(
 						return processDirectory(directory);
 					// Check package.json
 					case Ternary.True:
-						// const packageJsonFileName = _combinePaths(directory, "package.json");
-						// this.watchPackageJsonFile(packageJsonFileName as ts.Path); // TODO
+						const packageJsonFileName = combinePaths(directory, "package.json");
+						this.watchPackageJsonFile(packageJsonFileName as Path);
 						const info = packageJsonCache.getInDirectory(directory);
 						if (info) result.push(info as any);
 				}
@@ -83,6 +98,50 @@ export function createProjectService(
 		fileExists(fileName: NormalizedPath): boolean {
 			return this.host.fileExists(fileName);
 		},
+
+		watchPackageJsonFile(path: Path) {
+			const watchers = this.packageJsonFilesMap || (this.packageJsonFilesMap = new Map());
+			if (!watchers.has(path)) {
+				this.invalidateProjectPackageJson(path);
+				watchers.set(
+					path,
+					watchFactory.watchFile(
+						path,
+						(fileName, eventKind) => {
+							const path = this.toPath(fileName);
+							switch (eventKind) {
+								case ts.FileWatcherEventKind.Created:
+									throw new Error('Expected package.json to exist already');
+								case ts.FileWatcherEventKind.Changed:
+									this.packageJsonCache.addOrUpdate(path);
+									this.invalidateProjectPackageJson(path);
+									break;
+								case  ts.FileWatcherEventKind.Deleted:
+									this.packageJsonCache.delete(path);
+									this.invalidateProjectPackageJson(path);
+									watchers.get(path)?.close();
+									watchers.delete(path);
+							}
+						},
+						/*PollingInterval.Low*/ 250,
+						undefined
+					),
+				);
+			}
+		},
+
+		invalidateProjectPackageJson(packageJsonPath: Path) {
+			this.projects.forEach(project => {
+				if (packageJsonPath) {
+					project.onPackageJsonChange(packageJsonPath);
+				}
+				else {
+					project.onAutoImportProviderSettingsChanged();
+				}
+			})
+		},
+
+		projects: new Set<Project>(),
 	};
 
 	projectService.packageJsonCache = createPackageJsonCache(ts, projectService);

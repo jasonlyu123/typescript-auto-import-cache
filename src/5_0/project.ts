@@ -4,10 +4,11 @@ import type {
 	Program,
 	ModuleResolutionHost,
 	PerformanceEvent,
-	LanguageService
+	LanguageService,
+	Path
 } from 'typescript/lib/tsserverlibrary';
 import type { ProjectPackageJsonInfo } from './packageJsonCache';
-import { ProjectService, PackageJsonAutoImportPreference } from './projectService';
+import { PackageJsonAutoImportPreference, ProjectService } from './projectService';
 import { createModuleSpecifierCache } from './moduleSpecifierCache';
 import { createAutoImportProviderProjectStatic } from './autoImportProviderProject';
 import { SymlinkCache } from './symlinkCache';
@@ -212,6 +213,15 @@ export function createProject(
 				this.autoImportProviderHost?.markAsDirty();
 			}
 		},
+
+		onPackageJsonChange(packageJsonPath: Path) {
+			if (this.packageJsonsForAutoImport?.has(packageJsonPath)) {
+				this.moduleSpecifierCache.clear();
+				if (this.autoImportProviderHost) {
+					this.autoImportProviderHost.markAsDirty();
+				}
+			}
+		}
 	};
 }
 
